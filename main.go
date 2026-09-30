@@ -19,6 +19,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
@@ -27,7 +28,6 @@ import (
 	"time"
 
 	"github.com/parca-dev/oomprof/oomprof"
-	log "github.com/sirupsen/logrus"
 )
 
 func main() {
@@ -42,9 +42,7 @@ func main() {
 
 	// Configure logging
 	if debug {
-		log.SetLevel(log.DebugLevel)
-	} else {
-		log.SetLevel(log.InfoLevel)
+		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 
 	ctx := context.Background()
@@ -70,13 +68,13 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Debug("Profile writer goroutine started")
+		slog.Debug("Profile writer goroutine started")
 		for profile := range profileChan {
-			log.WithFields(log.Fields{"pid": profile.PID, "command": profile.Command}).Debug("Received profile")
+			slog.Debug("Received profile", "pid", profile.PID, "command", profile.Command)
 
 			// Skip empty profiles
 			if profile.Profile == nil || len(profile.Profile.Sample) == 0 {
-				log.WithField("pid", profile.PID).Debug("Skipping empty profile")
+				slog.Debug("Skipping empty profile", "pid", profile.PID)
 				continue
 			}
 
@@ -85,17 +83,17 @@ func main() {
 			filename := fmt.Sprintf("%s-%d-%s.pb.gz", profile.Command, profile.PID, timestamp)
 			f, err := os.Create(filename)
 			if err != nil {
-				log.WithError(err).WithField("filename", filename).Error("Failed to create profile file")
+				slog.Error("Failed to create profile file", "error", err, "filename", filename)
 				continue
 			}
 
 			if err := profile.Profile.Write(f); err != nil {
-				log.WithError(err).WithField("filename", filename).Error("Failed to write profile")
+				slog.Error("Failed to write profile", "error", err, "filename", filename)
 			}
 			f.Close()
-			log.WithField("filename", filename).Info("Profile written")
+			slog.Info("Profile written", "filename", filename)
 		}
-		log.Debug("Profile writer goroutine exiting")
+		slog.Debug("Profile writer goroutine exiting")
 	}()
 
 	// If -p flag is provided, profile specific PIDs
@@ -108,19 +106,19 @@ func main() {
 			if pidStr == "self" {
 				// Profile the current process (oompa itself)
 				pid = os.Getpid()
-				log.WithField("pid", pid).Debug("Profiling self")
+				slog.Debug("Profiling self", "pid", pid)
 			} else {
 				var err error
 				pid, err = strconv.Atoi(pidStr)
 				if err != nil {
-					log.WithField("pid", pidStr).Error("Invalid PID")
+					slog.Error("Invalid PID", "pid", pidStr)
 					continue
 				}
-				log.WithField("pid", pid).Debug("Profiling PID")
+				slog.Debug("Profiling PID", "pid", pid)
 			}
 
 			if err := state.ProfilePid(ctx, uint32(pid)); err != nil {
-				log.WithError(err).WithField("pid", pid).Error("Failed to profile PID")
+				slog.Error("Failed to profile PID", "error", err, "pid", pid)
 			}
 		}
 		// Close the channel after all PIDs are profiled

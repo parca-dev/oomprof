@@ -12,9 +12,10 @@
 package oomprof
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"os"
-
-	"github.com/sirupsen/logrus"
 )
 
 // Set this to true when debug env var is set.
@@ -28,9 +29,9 @@ func init() {
 // logf logs debugging as higher level so they stick out w/o
 // enabling debug firehose if LUA_DEBUG env var is set.
 func logf(format string, args ...interface{}) {
+	level := slog.LevelDebug
 	if development {
-		logrus.Infof(format, args...)
-	} else {
-		logrus.Debugf(format, args...)
+		level = slog.LevelInfo
 	}
+	slog.Log(context.Background(), level, fmt.Sprintf(format, args...))
 }

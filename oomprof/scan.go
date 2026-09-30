@@ -18,12 +18,11 @@ package oomprof
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
-
-	log "github.com/sirupsen/logrus"
 )
 
 // scanGoProcesses scans the /proc filesystem for running Go processes
@@ -86,7 +85,7 @@ func scanGoProcesses(ctx context.Context, goProcs map[uint32]int64, pidToExeInfo
 		if err != nil {
 			// Skip if we can't read the command line (usually permission issues)
 			goProcs[uint32(pid)] = -1
-			log.WithError(err).WithField("pid", pid).Debug("error reading cmdline for PID")
+			slog.Debug("error reading cmdline for PID", "error", err, "pid", pid)
 			continue
 		}
 		commPath := fmt.Sprintf("/proc/%d/comm", pid)
@@ -94,7 +93,7 @@ func scanGoProcesses(ctx context.Context, goProcs map[uint32]int64, pidToExeInfo
 		if err != nil {
 			// Skip if we can't read the command line (usually permission issues)
 			goProcs[uint32(pid)] = -1
-			log.WithError(err).WithField("pid", pid).Debug("error reading comm for PID")
+			slog.Debug("error reading comm for PID", "error", err, "pid", pid)
 			continue
 		}
 
@@ -106,7 +105,7 @@ func scanGoProcesses(ctx context.Context, goProcs map[uint32]int64, pidToExeInfo
 		if err != nil {
 			// Skip if we can't open the executable (usually permission issues)
 			goProcs[uint32(pid)] = -1
-			log.WithError(err).WithField("pid", pid).Debug("error opening ELF file for PID")
+			slog.Debug("error opening ELF file for PID", "error", err, "pid", pid)
 			continue
 		}
 
@@ -122,20 +121,20 @@ func scanGoProcesses(ctx context.Context, goProcs map[uint32]int64, pidToExeInfo
 		// Get the BuildID
 		buildID, err := elfFile.GetBuildID()
 		if err != nil {
-			log.WithError(err).WithField("pid", pid).Debug("error getting build ID for PID")
+			slog.Debug("error getting build ID for PID", "error", err, "pid", pid)
 			buildID = "" // Use empty string if we can't get the build ID
 		}
 
 		// This is a Go program - look up the mbuckets symbol
 		mbucketsAddr, err := elfFile.LookupSymbol("runtime.mbuckets")
 		if err != nil {
-			log.WithError(err).Error("error looking up mbuckets symbol")
+			slog.Error("error looking up mbuckets symbol", "error", err)
 			goProcs[uint32(pid)] = -1
 			continue
 		}
 
 		goProcs[uint32(pid)] = int64(mbucketsAddr.Address)
-		log.WithFields(log.Fields{"pid": pid, "mbuckets": fmt.Sprintf("%x", mbucketsAddr.Address), "comm": strings.TrimSpace(string(comm)), "cmdline": cmdlineStr, "buildid": buildID}).Debug("oomprof: found Go program")
+		slog.Debug("oomprof: found Go program", "pid", pid, "mbuckets", fmt.Sprintf("%x", mbucketsAddr.Address), "comm", strings.TrimSpace(string(comm)), "cmdline", cmdlineStr, "buildid", buildID)
 
 		// Store the PID to exe info mapping in the sync.Map
 		exeInfo := &ExeInfo{
