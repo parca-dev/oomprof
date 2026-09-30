@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime/pprof"
 	"strings"
@@ -33,7 +34,6 @@ import (
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/google/pprof/profile"
-	log "github.com/sirupsen/logrus"
 
 	lru "github.com/elastic/go-freelru"
 )
@@ -300,7 +300,7 @@ func setupCommon(ctx context.Context, cfg *Config, profileChan chan<- ProfileDat
 				default:
 					newProcs, err := scanGoProcesses(ctx, seenMap, s.pidToExeInfo)
 					if err != nil {
-						log.WithError(err).Error("error scanning Go processes")
+						slog.Error("error scanning Go processes", "error", err)
 						if firstScan {
 							close(firstScanDone)
 							firstScan = false
@@ -431,7 +431,7 @@ func (s *State) reportBucketsAsTraces(allBuckets []bpfGobucket, pid uint32, comm
 		}
 	}
 
-	log.Infof("oomprof: reported all traces for PID:%v", pid)
+	slog.Info(fmt.Sprintf("oomprof: reported all traces for PID:%v", pid))
 	return nil
 }
 
@@ -446,7 +446,7 @@ func loadBPF() (*bpfObjects, link.Link, link.Link, error) {
 	// Set program options - disable CO-RE for compatibility
 	var progOpts ebpf.ProgramOptions
 	// Only enable verbose logging if we're in debug mode
-	if log.GetLevel() == log.DebugLevel {
+	if slog.Default().Enabled(context.Background(), slog.LevelDebug) {
 		progOpts.LogLevel = ebpf.LogLevelBranch | ebpf.LogLevelInstruction | ebpf.LogLevelStats
 		progOpts.LogSizeStart = 1024 * 1024
 	} else {
@@ -464,10 +464,10 @@ func loadBPF() (*bpfObjects, link.Link, link.Link, error) {
 		// Try to find VerifierError in the error chain
 		var verr *ebpf.VerifierError
 		if errors.As(err, &verr) {
-			log.Errorf("oomprof: verifier error details:\n%+v\n", verr)
+			slog.Error(fmt.Sprintf("oomprof: verifier error details:\n%+v", verr))
 		} else {
 			// Try unwrapping the error
-			log.Errorf("oomprof: BPF load error: %+v\n", err)
+			slog.Error(fmt.Sprintf("oomprof: BPF load error: %+v", err))
 			// Check each level of the error chain
 			currentErr := err
 			for i := 0; i < 10; i++ {
@@ -476,7 +476,7 @@ func loadBPF() (*bpfObjects, link.Link, link.Link, error) {
 					break
 				}
 				if errors.As(currentErr, &verr) {
-					log.Errorf("oomprof: found VerifierError at level %d:\n%+v\n", i+1, verr)
+					slog.Error(fmt.Sprintf("oomprof: found VerifierError at level %d:\n%+v", i+1, verr))
 					break
 				}
 			}
@@ -529,7 +529,7 @@ func (s *State) addGoProcess(pid uint32, mbucketsAddr uint64) error {
 		ReportAlloc: s.config.ReportAlloc,
 	}
 	if err := s.maps.GoProcs.Put(pid, &goProc); err != nil {
-		log.WithError(err).WithField("pid", pid).Error("oomprof: error putting PID into go_procs map")
+		slog.Error("oomprof: error putting PID into go_procs map", "error", err, "pid", pid)
 		return err
 	}
 	return nil
@@ -594,7 +594,7 @@ func (s *State) addProcess(pid uint32) error {
 
 	// Add to eBPF monitoring
 	if err := s.addGoProcess(pid, mbucketsAddr); err != nil {
-		log.WithError(err).WithField("pid", pid).Error("oomprof: failed to add Go process to eBPF monitoring")
+		slog.Error("oomprof: failed to add Go process to eBPF monitoring", "error", err, "pid", pid)
 		return err
 	}
 	logf("oomprof: successfully added PID %d to eBPF monitoring", pid)
@@ -693,7 +693,7 @@ func (s *State) UnwatchPid(pid uint32) {
 			}
 
 			// Timeout after 5 seconds, proceed with cleanup anyway
-			log.WithField("pid", pid).Error("oomprof: timeout waiting for profile_pid to clear, proceeding with cleanup")
+			slog.Error("oomprof: timeout waiting for profile_pid to clear, proceeding with cleanup", "pid", pid)
 			s.performPidCleanup(pid)
 		}()
 		return
@@ -707,7 +707,7 @@ func (s *State) UnwatchPid(pid uint32) {
 func (s *State) performPidCleanup(pid uint32) {
 	// Remove from eBPF go_procs map
 	if err := s.maps.GoProcs.Delete(pid); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
-		log.WithError(err).WithField("pid", pid).Warn("Failed to delete PID from go_procs map")
+		slog.Warn("Failed to delete PID from go_procs map", "error", err, "pid", pid)
 	}
 
 	// Remove from pidToExeInfo sync.Map
@@ -726,7 +726,7 @@ func (s *State) performPidCleanup(pid uint32) {
 	var key uint32 = 0
 	var pidValue int32 = 0
 	if err := s.maps.ProfilePid.Put(key, pidValue); err != nil {
-		log.WithError(err).Error("Failed to clear profile_pid map")
+		slog.Error("Failed to clear profile_pid map", "error", err)
 	}
 
 	logf("oomprof: removed PID %d from all tracking maps and caches", pid)
@@ -773,7 +773,7 @@ func (s *State) ProfilePid(ctx context.Context, pid uint32) error {
 	// copy pprof labels
 	s.capturePprofLabels(ctx)
 
-	log.WithField("pid", pid).Info("oomprof: sent SIGUSR1 to PID, waiting for profile...")
+	slog.Info("oomprof: sent SIGUSR1 to PID, waiting for profile...", "pid", pid)
 
 	// Wait for profile_pid to be reset to 0 by monitorEventMap
 	for {
@@ -786,7 +786,7 @@ func (s *State) ProfilePid(ctx context.Context, pid uint32) error {
 				return fmt.Errorf("failed to check profile_pid: %w", err)
 			}
 			if currentPid == 0 {
-				log.WithField("pid", pid).Info("oomprof: profile for PID completed")
+				slog.Info("oomprof: profile for PID completed", "pid", pid)
 				return nil
 			}
 		}
@@ -831,7 +831,7 @@ func processBuckets(maps *bpfMaps, numBuckets uint32) ([]bpfGobucket, error) {
 		}
 	}
 
-	log.WithFields(log.Fields{"retrieved": len(allBuckets), "total": numBuckets}).Info("oomprof: retrieved buckets")
+	slog.Info("oomprof: retrieved buckets", "retrieved", len(allBuckets), "total", numBuckets)
 
 	return allBuckets, nil
 }
@@ -851,7 +851,7 @@ func readProfile(allBuckets []bpfGobucket, binaryPath string, buildID string, sy
 func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo *sync.Map) {
 	eventReader, err := perf.NewReader(state.maps.SignalEvents, 1)
 	if err != nil {
-		log.WithError(err).Error("oomprof: error creating perf reader")
+		slog.Error("oomprof: error creating perf reader", "error", err)
 		return
 	}
 	defer func() {
@@ -879,17 +879,17 @@ func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo 
 				if errors.Is(err, perf.ErrClosed) {
 					return
 				}
-				log.WithError(err).Error("oomprof: reading from perf event reader")
+				slog.Error("oomprof: reading from perf event reader", "error", err)
 				continue
 			}
 			if rec.LostSamples != 0 {
-				log.WithField("lost_samples", rec.LostSamples).Warn("oomprof: perf event ring buffer full")
+				slog.Warn("oomprof: perf event ring buffer full", "lost_samples", rec.LostSamples)
 				continue
 			}
 			// Extract the PID from the raw sample data
 			ev := bpfEvent{}
 			if err := binary.Read(bytes.NewBuffer(rec.RawSample), binary.LittleEndian, &ev); err != nil {
-				log.WithError(err).Error("parsing perf event")
+				slog.Error("parsing perf event", "error", err)
 				continue
 			}
 			switch ev.EventType {
@@ -898,17 +898,17 @@ func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo 
 
 				var gop bpfGoProc
 				if err := state.maps.GoProcs.Lookup(pid, &gop); err != nil {
-					log.WithError(err).WithField("pid", pid).Error("error getting PID from go_procs map")
+					slog.Error("error getting PID from go_procs map", "error", err, "pid", pid)
 					continue
 				}
-				log.Infof("oomprof: got profile event for PID %d with buckets %d, complete: %t, read_error: %t", pid, gop.NumBuckets, gop.Complete, gop.ReadError)
+				slog.Info(fmt.Sprintf("oomprof: got profile event for PID %d with buckets %d, complete: %t, read_error: %t", pid, gop.NumBuckets, gop.Complete, gop.ReadError))
 
 				// Retrieve the exe info from the sync.Map
 				var exeInfo *ExeInfo
 				if infoValue, ok := pidToExeInfo.Load(pid); ok {
 					exeInfo = infoValue.(*ExeInfo)
 				} else {
-					log.WithField("pid", pid).Warn("exe info not found for PID")
+					slog.Warn("exe info not found for PID", "pid", pid)
 					exeInfo = &ExeInfo{Path: "", BuildID: ""}
 				}
 
@@ -928,7 +928,7 @@ func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo 
 				// Read buckets from eBPF map
 				allBuckets, err := processBuckets(state.maps, gop.NumBuckets)
 				if err != nil {
-					log.WithError(err).WithField("pid", pid).Error("oomprof: error reading buckets for PID")
+					slog.Error("oomprof: error reading buckets for PID", "error", err, "pid", pid)
 					continue
 				}
 
@@ -937,12 +937,12 @@ func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo 
 					// Original pprof mode
 					prof, err := readProfile(allBuckets, exeInfo.Path, exeInfo.BuildID, s.config.Symbolize, s.config.ReportAlloc)
 					if err != nil {
-						log.WithError(err).WithField("pid", pid).Error("error reading profile for PID")
+						slog.Error("error reading profile for PID", "error", err, "pid", pid)
 					} else {
-						log.WithField("pid", pid).Debug("Successfully read profile for PID")
+						slog.Debug("Successfully read profile for PID", "pid", pid)
 						// Send profile data through channel
 						sendStart := time.Now()
-						log.WithField("pid", pid).Debug("Attempting to send profile to channel")
+						slog.Debug("Attempting to send profile to channel", "pid", pid)
 						select {
 						case state.profileChan <- ProfileData{
 							PID:            pid,
@@ -952,18 +952,15 @@ func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo 
 							MaxStackErrors: gop.MaxStackErrors,
 							Complete:       gop.Complete,
 						}:
-							log.WithFields(log.Fields{
-								"pid":           pid,
-								"send_duration": time.Since(sendStart),
-							}).Info("Successfully sent profile to channel")
+							slog.Info("Successfully sent profile to channel", "pid", pid, "send_duration", time.Since(sendStart))
 							// Clear the profile_pid map after successfully sending the profile
 							var key uint32 = 0
 							var pidValue int32 = 0
 							if err := state.maps.ProfilePid.Put(key, pidValue); err != nil {
-								log.WithError(err).Error("Failed to clear profile_pid map")
+								slog.Error("Failed to clear profile_pid map", "error", err)
 							}
 						case <-ctx.Done():
-							log.WithField("pid", pid).Debug("Context cancelled while sending profile")
+							slog.Debug("Context cancelled while sending profile", "pid", pid)
 							return
 						}
 					}
@@ -971,14 +968,14 @@ func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo 
 					// TraceReporter mode
 					err = state.reportBucketsAsTraces(allBuckets, pid, command, exeInfo.Path, exeInfo.BuildID)
 					if err != nil {
-						log.WithError(err).WithField("pid", pid).Error("oomprof: error reporting traces for PID")
+						slog.Error("oomprof: error reporting traces for PID", "error", err, "pid", pid)
 					} else {
 						logf("oomprof: successfully reported traces for PID %d", pid)
 						// Clear the profile_pid map after successfully reporting
 						var key uint32 = 0
 						var pidValue int32 = 0
 						if err := state.maps.ProfilePid.Put(key, pidValue); err != nil {
-							log.WithError(err).Error("oomprof: failed to clear profile_pid map")
+							slog.Error("oomprof: failed to clear profile_pid map", "error", err)
 						}
 					}
 				}

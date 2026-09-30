@@ -18,6 +18,7 @@ package oomprof
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sort"
@@ -26,7 +27,6 @@ import (
 	"time"
 
 	"github.com/containerd/cgroups/v3/cgroup2"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,7 +86,7 @@ var testCfg = Config{
 }
 
 func TestOOMProf(t *testing.T) {
-	log.SetLevel(log.DebugLevel)
+	slog.SetLogLoggerLevel(slog.LevelDebug)
 	// Check if go is available to decide which test to run
 	_, goAvailable := exec.LookPath("go")
 

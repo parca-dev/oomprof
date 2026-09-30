@@ -4,13 +4,14 @@ package oomprof_test
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"testing"
 	"time"
 
 	"github.com/parca-dev/oomprof/oomprof"
-	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,7 +56,7 @@ func TestOOMProfileChannelMode(t *testing.T) {
 			case <-ctx.Done():
 				return
 			case profileData := <-profileChan:
-				log.Infof("Received profile for PID %d, command %s", profileData.PID, profileData.Command)
+				slog.Info(fmt.Sprintf("Received profile for PID %d, command %s", profileData.PID, profileData.Command))
 				profileReceived <- profileData
 			}
 		}

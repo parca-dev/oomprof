@@ -17,13 +17,13 @@ package oomprof
 
 import (
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/pprof/profile"
-	log "github.com/sirupsen/logrus"
 )
 
 func bucketsToPprof(buckets []bpfGobucket, binaryPath string, buildID string, symbolize bool, reportAlloc bool) (*profile.Profile, error) {
@@ -221,14 +221,14 @@ func batchResolveSymbols(binaryPath string, addrs map[uint64]bool) map[uint64]sy
 		addrOrder = append(addrOrder, addr)
 	}
 
-	log.WithField("count", len(addrList)).Debug("Batch symbolizing addresses")
+	slog.Debug("Batch symbolizing addresses", "count", len(addrList))
 	startTime := time.Now()
 
 	// Call addr2line with all addresses at once
 	cmd := exec.Command("addr2line", append([]string{"-e", binaryPath, "-f", "-C"}, addrList...)...)
 	output, err := cmd.Output()
 	if err != nil {
-		log.WithError(err).Debug("addr2line batch call failed")
+		slog.Debug("addr2line batch call failed", "error", err)
 		// Return empty symbols
 		for _, addr := range addrOrder {
 			result[addr] = symbolInfo{
@@ -273,6 +273,6 @@ func batchResolveSymbols(binaryPath string, addrs map[uint64]bool) map[uint64]sy
 		}
 	}
 
-	log.WithField("duration", time.Since(startTime)).Debug("Batch symbolization completed")
+	slog.Debug("Batch symbolization completed", "duration", time.Since(startTime))
 	return result
 }
