@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"go/version"
 	"log/slog"
 	"os"
 	"runtime/pprof"
@@ -38,7 +39,7 @@ import (
 	lru "github.com/elastic/go-freelru"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $GOARCH -tags linux bpf ../oomprof.c
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target $GOARCH -type memRecordCycle -tags linux bpf ../oomprof.c
 
 var (
 	// globalState holds the singleton State instance
@@ -308,7 +309,7 @@ func setupCommon(ctx context.Context, cfg *Config, profileChan chan<- ProfileDat
 						continue
 					}
 					for _, p := range newProcs {
-						if err := s.addGoProcess(p.PID, p.MBucketsAddr); err != nil {
+						if err := s.addGoProcess(p.PID, p.MBucketsAddr, p.GoVersion); err != nil {
 							logf("oomprof: failed to add go process %d: %v", p.PID, err)
 						}
 					}
@@ -343,7 +344,7 @@ func setupCommon(ctx context.Context, cfg *Config, profileChan chan<- ProfileDat
 }
 
 // ReportBucketsAsTraces converts memory buckets to traces and reports them using the TraceReporter.
-func (s *State) reportBucketsAsTraces(allBuckets []bpfGobucket, pid uint32, command string, binaryPath string, buildID string) error {
+func (s *State) reportBucketsAsTraces(allBuckets []profileBucket, pid uint32, command string, binaryPath string, buildID string) error {
 	if s.traceReporter == nil {
 		return fmt.Errorf("no trace reporter configured")
 	}
@@ -400,7 +401,7 @@ func (s *State) reportBucketsAsTraces(allBuckets []bpfGobucket, pid uint32, comm
 			}
 
 			// Build the sample from the stack
-			stackLen := int(bucket.Header.Nstk)
+			stackLen := len(bucket.Stk)
 			addresses := make([]Address, 0, stackLen)
 
 			for i := 0; i < stackLen; i++ {
@@ -522,11 +523,14 @@ func loadBPF() (*bpfObjects, link.Link, link.Link, error) {
 }
 
 // Consider making this a public API and letting clients manage which processes to monitor.
-func (s *State) addGoProcess(pid uint32, mbucketsAddr uint64) error {
+func (s *State) addGoProcess(pid uint32, mbucketsAddr uint64, goVersion string) error {
 	// update go_procs map
 	goProc := bpfGoProc{
 		Mbuckets:    mbucketsAddr,
 		ReportAlloc: s.config.ReportAlloc,
+	}
+	if version.Compare(strings.TrimPrefix(goVersion, "devel "), "go1.27") >= 0 {
+		goProc.CompactMemRecord = 1
 	}
 	if err := s.maps.GoProcs.Put(pid, &goProc); err != nil {
 		slog.Error("oomprof: error putting PID into go_procs map", "error", err, "pid", pid)
@@ -584,7 +588,7 @@ func (s *State) watchPIDSync(pid uint32) error {
 
 func (s *State) addProcess(pid uint32) error {
 	// Look up the mbuckets address for this PID
-	mbucketsAddr, err := s.getMBucketsAddrForPID(pid, s.pidToExeInfo)
+	mbucketsAddr, goVersion, err := s.getMBucketsAddrForPID(pid, s.pidToExeInfo)
 	if err != nil {
 		logf("oomprof: failed to get mbuckets address for PID %d: %v", pid, err)
 		return err
@@ -593,7 +597,7 @@ func (s *State) addProcess(pid uint32) error {
 	logf("oomprof: resolved mbuckets address for PID %d: 0x%x", pid, mbucketsAddr)
 
 	// Add to eBPF monitoring
-	if err := s.addGoProcess(pid, mbucketsAddr); err != nil {
+	if err := s.addGoProcess(pid, mbucketsAddr, goVersion); err != nil {
 		slog.Error("oomprof: failed to add Go process to eBPF monitoring", "error", err, "pid", pid)
 		return err
 	}
@@ -601,29 +605,29 @@ func (s *State) addProcess(pid uint32) error {
 	return nil
 }
 
-// getMBucketsAddrForPID looks up the mbuckets address for a specific PID by reading its ELF file
-func (s *State) getMBucketsAddrForPID(pid uint32, pidToExeInfo *sync.Map) (uint64, error) {
+// getMBucketsAddrForPID reads the mbuckets address and Go version from the PID's ELF file.
+func (s *State) getMBucketsAddrForPID(pid uint32, pidToExeInfo *sync.Map) (uint64, string, error) {
 	// Get the executable path for this PID
 	exePath := fmt.Sprintf("/proc/%d/exe", pid)
 
 	// Resolve the actual executable path by following the symlink
 	realExePath, err := os.Readlink(exePath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to read exe link for PID %d: %w", pid, err)
+		return 0, "", fmt.Errorf("failed to read exe link for PID %d: %w", pid, err)
 	}
 
 	// Try to open the executable using the ELF reader
 	elfReader := GetELFReader()
 	elfFile, err := elfReader.Open(exePath)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open ELF file for PID %d: %w", pid, err)
+		return 0, "", fmt.Errorf("failed to open ELF file for PID %d: %w", pid, err)
 	}
 	defer elfFile.Close()
 
 	// Get Go version for this executable
 	goVersion, err := elfFile.GoVersion()
 	if err != nil || goVersion == "" {
-		return 0, fmt.Errorf("not a Go program or failed to get Go version for PID %d: %w", pid, err)
+		return 0, "", fmt.Errorf("not a Go program or failed to get Go version for PID %d: %w", pid, err)
 	}
 
 	// Get the BuildID
@@ -636,7 +640,7 @@ func (s *State) getMBucketsAddrForPID(pid uint32, pidToExeInfo *sync.Map) (uint6
 	// Look up the mbuckets symbol
 	mbucketsAddr, err := elfFile.LookupSymbol("runtime.mbuckets")
 	if err != nil {
-		return 0, fmt.Errorf("failed to find runtime.mbuckets symbol for PID %d: %w", pid, err)
+		return 0, "", fmt.Errorf("failed to find runtime.mbuckets symbol for PID %d: %w", pid, err)
 	}
 
 	// Store the PID to exe info mapping in the sync.Map
@@ -649,7 +653,7 @@ func (s *State) getMBucketsAddrForPID(pid uint32, pidToExeInfo *sync.Map) (uint6
 	logf("oomprof: resolved mbuckets address for PID %d: 0x%x, buildID: %s, exePath: %s, goVersion: %s",
 		pid, mbucketsAddr.Address, buildID, realExePath, goVersion)
 
-	return mbucketsAddr.Address, nil
+	return mbucketsAddr.Address, goVersion, nil
 }
 
 // capturePprofLabels captures current pprof labels and stores them in the state
@@ -793,12 +797,22 @@ func (s *State) ProfilePid(ctx context.Context, pid uint32) error {
 	}
 }
 
-// processBuckets reads buckets from the eBPF map and returns them
-func processBuckets(maps *bpfMaps, numBuckets uint32) ([]bpfGobucket, error) {
+// profileBucket is a decoded runtime record shared by pprof and trace reporting.
+type profileBucket struct {
+	Stk []uint64
+	Mem bpfMemRecord
+}
+
+// processBuckets reads buckets from the eBPF map and decodes the target's layout.
+func processBuckets(maps *bpfMaps, numBuckets uint32, compactMemRecord bool) ([]profileBucket, error) {
 	const maxBatchSize = uint32(32) // Adjust based on your needs and kernel limits
 
-	var allBuckets []bpfGobucket
+	var allBuckets []profileBucket
 	var cursor ebpf.MapBatchCursor
+	cycleWords := 4 // allocs, frees, allocBytes, freeBytes before Go 1.27
+	if compactMemRecord {
+		cycleWords = 2 // allocs, frees in Go 1.27+
+	}
 
 	// Process buckets in batches
 	for start := uint32(0); start < numBuckets; start += maxBatchSize {
@@ -822,8 +836,26 @@ func processBuckets(maps *bpfMaps, numBuckets uint32) ([]bpfGobucket, error) {
 			return nil, fmt.Errorf("batch lookup failed at offset %d: %v", start, err)
 		}
 
-		// Add retrieved buckets to our collection
-		allBuckets = append(allBuckets, values[:count]...)
+		// Normalize active and all three future cycles before either output path.
+		for _, raw := range values[:count] {
+			var cycles [4]bpfMemRecordCycle
+			for c := range cycles {
+				offset := c * cycleWords
+				cycles[c].Allocs = raw.Record[offset]
+				cycles[c].Frees = raw.Record[offset+1]
+				if compactMemRecord {
+					cycles[c].AllocBytes = cycles[c].Allocs * raw.Header.Size
+					cycles[c].FreeBytes = cycles[c].Frees * raw.Header.Size
+				} else {
+					cycles[c].AllocBytes = raw.Record[offset+2]
+					cycles[c].FreeBytes = raw.Record[offset+3]
+				}
+			}
+			bucket := profileBucket{Stk: append([]uint64(nil), raw.Stk[:raw.Header.Nstk]...)}
+			bucket.Mem.Active = cycles[0]
+			copy(bucket.Mem.Future[:], cycles[1:])
+			allBuckets = append(allBuckets, bucket)
+		}
 
 		// If we got fewer buckets than requested, we've reached the end
 		if count < int(batchSize) {
@@ -836,7 +868,7 @@ func processBuckets(maps *bpfMaps, numBuckets uint32) ([]bpfGobucket, error) {
 	return allBuckets, nil
 }
 
-func readProfile(allBuckets []bpfGobucket, binaryPath string, buildID string, symbolize bool, reportAlloc bool) (*profile.Profile, error) {
+func readProfile(allBuckets []profileBucket, binaryPath string, buildID string, symbolize bool, reportAlloc bool) (*profile.Profile, error) {
 	// Convert to pprof format
 	convertStart := time.Now()
 	prof, err := bucketsToPprof(allBuckets, binaryPath, buildID, symbolize, reportAlloc)
@@ -926,7 +958,7 @@ func (s *State) monitorEventMap(ctx context.Context, state *State, pidToExeInfo 
 				}
 
 				// Read buckets from eBPF map
-				allBuckets, err := processBuckets(state.maps, gop.NumBuckets)
+				allBuckets, err := processBuckets(state.maps, gop.NumBuckets, gop.CompactMemRecord != 0)
 				if err != nil {
 					slog.Error("oomprof: error reading buckets for PID", "error", err, "pid", pid)
 					continue
