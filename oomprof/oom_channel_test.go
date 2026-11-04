@@ -3,14 +3,17 @@
 package oomprof_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/pprof/profile"
 	"github.com/parca-dev/oomprof/oomprof"
 	"github.com/stretchr/testify/require"
 )
@@ -18,6 +21,85 @@ import (
 func init() {
 	// Set memory profile rate to 1 for maximum profile buckets
 	runtime.MemProfileRate = 1
+}
+
+// TestHeapProfileRecords checks exact counts and bytes from both published and
+// pending GC cycles. Build with go test -c to retain runtime symbols, then run
+// the test binary as root for each supported Go toolchain.
+func TestHeapProfileRecords(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("Test requires root privileges")
+	}
+	elf, err := oomprof.DefaultELFReader().Open("/proc/self/exe")
+	require.NoError(t, err)
+	_, symbolErr := elf.LookupSymbol("runtime.mbuckets")
+	require.NoError(t, elf.Close())
+	if symbolErr != nil {
+		t.Skip("Test requires runtime symbols; build with go test -c and run the binary as root")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	profiles := make(chan oomprof.ProfileData, 1)
+	state, err := oomprof.Setup(ctx, &oomprof.Config{ReportAlloc: true}, profiles)
+	require.NoError(t, err)
+	defer state.Close()
+
+	chunks := make([][]byte, 11)
+	fillProfileObjects(chunks, 4096)
+	for i := 0; i < 4; i++ {
+		chunks[i] = nil
+	}
+	large := make([][]byte, 3)
+	fillProfileObjects(large, 12288)
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+	}
+	// Leave these allocations in a future cycle rather than the active record.
+	pending := make([][]byte, 7)
+	fillProfileObjects(pending, 4096)
+
+	require.NoError(t, state.ProfilePid(ctx, uint32(os.Getpid())))
+	select {
+	case data := <-profiles:
+		require.True(t, data.Complete)
+		require.False(t, data.ReadError)
+		var buf bytes.Buffer
+		require.NoError(t, data.Profile.Write(&buf))
+		prof, err := profile.ParseData(buf.Bytes())
+		require.NoError(t, err)
+		require.NoError(t, prof.CheckValid())
+
+		totals := make([]int64, 4)
+		for _, sample := range prof.Sample {
+			for _, loc := range sample.Location {
+				fn := runtime.FuncForPC(uintptr(loc.Address - 1))
+				if fn == nil || !strings.HasSuffix(fn.Name(), ".fillProfileObjects") {
+					continue
+				}
+				for i, value := range sample.Value {
+					totals[i] += value
+				}
+				break
+			}
+		}
+		// 18 small allocations, 4 freed, plus 3 live large allocations.
+		require.Equal(t, []int64{17, 94208, 21, 110592}, totals,
+			"inuse_objects, inuse_space, alloc_objects, alloc_space on %s", runtime.Version())
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	runtime.KeepAlive(chunks)
+	runtime.KeepAlive(large)
+	runtime.KeepAlive(pending)
+}
+
+//go:noinline
+func fillProfileObjects(chunks [][]byte, size int) {
+	for i := range chunks {
+		chunks[i] = make([]byte, size)
+		chunks[i][0] = byte(i)
+	}
 }
 
 // TestOOMProfileChannelMode tests OOM profiling using the channel-based Setup call

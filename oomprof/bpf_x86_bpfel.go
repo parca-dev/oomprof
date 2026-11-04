@@ -20,15 +20,16 @@ type bpfEvent struct {
 }
 
 type bpfGoProc struct {
-	_              structs.HostLayout
-	Mbuckets       uint64
-	NumBuckets     uint32
-	MaxStackErrors uint32
-	ReadError      bool
-	Complete       bool
-	ReportAlloc    bool
-	Started        bool
-	_              [4]byte
+	_                structs.HostLayout
+	Mbuckets         uint64
+	NumBuckets       uint32
+	MaxStackErrors   uint32
+	ReadError        bool
+	Complete         bool
+	ReportAlloc      bool
+	Started          bool
+	CompactMemRecord uint8
+	_                [3]byte
 }
 
 type bpfGobucket struct {
@@ -42,26 +43,22 @@ type bpfGobucket struct {
 		Size       uint64
 		Nstk       uint64
 	}
-	Stk [64]uint64
-	Mem bpfMemRecord
+	Stk    [64]uint64
+	Record [16]uint64
 }
 
 type bpfMemRecord struct {
 	_      structs.HostLayout
-	Active struct {
-		_          structs.HostLayout
-		Allocs     uint64
-		Frees      uint64
-		AllocBytes uint64
-		FreeBytes  uint64
-	}
-	Future [3]struct {
-		_          structs.HostLayout
-		Allocs     uint64
-		Frees      uint64
-		AllocBytes uint64
-		FreeBytes  uint64
-	}
+	Active bpfMemRecordCycle
+	Future [3]bpfMemRecordCycle
+}
+
+type bpfMemRecordCycle struct {
+	_          structs.HostLayout
+	Allocs     uint64
+	Frees      uint64
+	AllocBytes uint64
+	FreeBytes  uint64
 }
 
 type bpfProfileState struct {

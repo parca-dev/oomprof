@@ -67,6 +67,18 @@ struct memRecord {
   struct memRecordCycle	future[3];
 };
 
+// Go 1.27 removed byte counters; bytes are counts * gobucket_header.size.
+// https://github.com/golang/go/commit/d247ed00e498e9717fb7c80d126bee5a8afdb4e8
+struct memRecordCycleGo127 {
+  u64 allocs;
+  u64 frees;
+};
+
+struct memRecordGo127 {
+  struct memRecordCycleGo127 active;
+  struct memRecordCycleGo127 future[3];
+};
+
 // https://github.com/golang/go/blob/6885bad7dd/src/runtime/mprof.go#L75
 struct gobucket_header {
   u64 next;
@@ -82,7 +94,8 @@ struct gobucket_header {
 struct gobucket {
   struct gobucket_header header;
   u64 stk[MAX_STACK_DEPTH];
-  struct memRecord mem;
+  // Raw runtime record, decoded in userspace according to the process's Go version.
+  u64 record[sizeof(struct memRecord) / sizeof(u64)];
 };
 
 
@@ -94,6 +107,7 @@ struct GoProc {
   bool complete;
   bool reportAlloc; // whether to report alloc metrics or just inuse
   bool started; // whether the process has started profiling
+  u8 compactMemRecord; // Go 1.27+ stores counts without byte counters
 };
 
 struct Event {
@@ -188,6 +202,10 @@ record_profile_buckets(void *ctx, struct ProfileState *state) {
     return 0;
   }
 
+  // Select the size without branching: two loop paths exceed the verifier budget.
+  u32 record_size = sizeof(struct memRecordGo127) + ((gop->compactMemRecord ^ 1) & 1) *
+    (sizeof(struct memRecord) - sizeof(struct memRecordGo127));
+
   for (u32 i=0; state->gobp != 0; i++, state->gobp = mbp->header.allnext) {
     if (i >= MAX_BUCKETS_PER_CALL) {
       state->num_tail_calls++;
@@ -223,8 +241,9 @@ record_profile_buckets(void *ctx, struct ProfileState *state) {
       gop->readError = true;
       break;
     }
-    // read memRecord last
-    if ((err = bpf_probe_read_user(&mbp->mem, sizeof(struct memRecord), (void*)(state->gobp + sizeof(struct gobucket_header) + stack_size)))) {
+    // Read only the target's record size. Decoding stays in userspace to keep
+    // the bucket loop within the verifier's instruction budget.
+    if ((err = bpf_probe_read_user(&mbp->record, record_size, (void*)(state->gobp + sizeof(struct gobucket_header) + stack_size)))) {
       DEBUG_PRINT("failed to read bucket memRecord at %llx err: %d\n", state->gobp + sizeof(struct gobucket_header) + stack_size, err);
       gop->readError = true;
       break;

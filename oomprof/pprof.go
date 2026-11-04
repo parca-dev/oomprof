@@ -26,7 +26,7 @@ import (
 	"github.com/google/pprof/profile"
 )
 
-func bucketsToPprof(buckets []bpfGobucket, binaryPath string, buildID string, symbolize bool, reportAlloc bool) (*profile.Profile, error) {
+func bucketsToPprof(buckets []profileBucket, binaryPath string, buildID string, symbolize bool, reportAlloc bool) (*profile.Profile, error) {
 	// Create a new pprof profile
 	prof := &profile.Profile{
 		DefaultSampleType: "inuse_space",
@@ -81,7 +81,7 @@ func bucketsToPprof(buckets []bpfGobucket, binaryPath string, buildID string, sy
 			continue
 		}
 
-		stackLen := int(bucket.Header.Nstk)
+		stackLen := len(bucket.Stk)
 		for i := 0; i < stackLen; i++ {
 			addr := bucket.Stk[i]
 			if addr != 0 {
@@ -116,7 +116,7 @@ func bucketsToPprof(buckets []bpfGobucket, binaryPath string, buildID string, sy
 		var locations []*profile.Location
 
 		// Process stack frames (up to nstk)
-		stackLen := int(buckets[b].Header.Nstk)
+		stackLen := len(buckets[b].Stk)
 
 		for i := 0; i < stackLen; i++ {
 			addr := buckets[b].Stk[i]
